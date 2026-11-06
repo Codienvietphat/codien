@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f4e79">
+<title>Quét QR tuần tra – Cơ Điện</title>
+<!--
+  TRÌNH QUÉT QR TỰ ĐỘNG cho Web App Cơ Điện
+  - Google chặn camera bên trong web app Apps Script, nên trang này được đặt ở chỗ khác (GitHub Pages, Netlify...).
+  - Camera quét liên tục, nhận được mã là tự mở phiếu tuần tra trong app. KHÔNG chụp, KHÔNG lưu ảnh.
+  - Link app (/exec) tự nhận khi mở trang từ nút "Quét QR" trong app; hoặc điền sẵn vào APP_URL dưới đây.
+-->
+<script>const APP_URL = '';  // VD: 'https://script.google.com/macros/s/XXXXXXXX/exec'</script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+#wrap{position:fixed;inset:0;display:flex;flex-direction:column}
+header{padding:12px 16px;padding-top:max(12px,env(safe-area-inset-top));background:#1f4e79;display:flex;align-items:center;gap:10px}
+header b{flex:1;font-size:16px}
+header a,header button{color:#fff;background:#ffffff22;border:0;border-radius:8px;padding:8px 12px;font-size:14px;text-decoration:none}
+#stage{position:relative;flex:1;overflow:hidden}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.frame{position:absolute;left:50%;top:45%;width:min(70vw,70vh,340px);aspect-ratio:1/1;transform:translate(-50%,-50%);border-radius:16px;box-shadow:0 0 0 9999px rgba(0,0,0,.45);border:3px solid #4fd18b}
+.frame.hit{border-color:#fff;background:rgba(79,209,139,.35)}
+.line{position:absolute;left:8%;right:8%;height:2px;background:#4fd18b;top:10%;animation:sc 1.8s ease-in-out infinite alternate;box-shadow:0 0 8px #4fd18b}
+@keyframes sc{to{top:88%}}
+#msg{position:absolute;left:16px;right:16px;bottom:calc(24px + env(safe-area-inset-bottom));text-align:center;font-size:15px;background:rgba(0,0,0,.55);padding:10px 12px;border-radius:10px}
+#msg.ok{background:#1e8e4e}#msg.err{background:#b3261e}
+#setup{display:none;position:absolute;inset:0;background:#f3f5f8;color:#1c2430;padding:20px;overflow:auto}
+#setup input{width:100%;padding:10px;font-size:15px;border:1px solid #ccc;border-radius:8px;margin:8px 0}
+#setup button{background:#1f4e79;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:15px}
+canvas{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <b>📷 Quét QR tuần tra</b>
+    <button id="torch" style="display:none">🔦</button>
+    <a id="toApp" href="#">Mở app</a>
+  </header>
+  <div id="stage">
+    <video id="v" playsinline muted autoplay></video>
+    <div class="frame" id="frame"><div class="line"></div></div>
+    <div id="msg">Đang mở camera...</div>
+    <div id="setup">
+      <h3>Chưa có link web app</h3>
+      <p>Mở trang này bằng nút <b>📷 Quét QR</b> trong app (app sẽ tự gửi link), hoặc dán link web app (kết thúc bằng <code>/exec</code>):</p>
+      <input id="appIn" placeholder="https://script.google.com/macros/s/.../exec">
+      <button id="saveApp">Lưu & bắt đầu quét</button>
+    </div>
+  </div>
+</div>
+<canvas id="c"></canvas>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const store={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+  const qs=new URLSearchParams(location.search);
+  let app=qs.get('app')||store.get('cd_app')||APP_URL||'';
+  if(qs.get('app')){store.set('cd_app',qs.get('app'));history.replaceState(null,'',location.pathname);}
+  const msg=(t,cls)=>{const m=$('msg');m.textContent=t;m.className=cls||'';};
+  $('toApp').href=app||'#';
+
+  if(!/^https:\/\/script\.google(usercontent)?\.com\//.test(app)){
+    $('setup').style.display='block';
+    $('saveApp').onclick=()=>{const v=$('appIn').value.trim();if(!/^https:\/\//.test(v)){alert('Link không hợp lệ');return;}
+      store.set('cd_app',v);location.reload();};
+    return;
+  }
+
+  let stream=null,track=null,detector=null,done=false,torchOn=false;
+  const c=$('c'),ctx=c.getContext('2d',{willReadFrequently:true}),v=$('v');
+
+  async function start(){
+    if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){msg('Trình duyệt không hỗ trợ camera. Hãy mở bằng Chrome (Android) hoặc Safari (iPhone).','err');return;}
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+    }catch(e){
+      msg(e.name==='NotAllowedError'?'Bạn đã chặn quyền camera. Vào cài đặt trình duyệt → Quyền trang web → Camera → Cho phép, rồi tải lại trang.':'Không mở được camera ('+e.name+').','err');return;
+    }
+    track=stream.getVideoTracks()[0];
+    v.srcObject=stream;try{await v.play();}catch(e){}
+    try{const cap=track.getCapabilities&&track.getCapabilities();if(cap&&cap.torch){$('torch').style.display='inline-block';}}catch(e){}
+    if('BarcodeDetector' in window){try{const f=await BarcodeDetector.getSupportedFormats();if(f.includes('qr_code'))detector=new BarcodeDetector({formats:['qr_code']});}catch(e){}}
+    msg('Đưa tem QR vào khung – tự nhận, không cần bấm');
+    loop();
+  }
+  async function loop(){
+    if(done)return;
+    if(!v.videoWidth){setTimeout(loop,150);return;}
+    let txt=null;
+    try{
+      if(detector){const r=await detector.detect(v);if(r&&r.length)txt=r[0].rawValue;}
+      else if(window.jsQR){
+        // chỉ đọc vùng giữa khung cho nhanh
+        const s=Math.min(v.videoWidth,v.videoHeight)*0.8,sx=(v.videoWidth-s)/2,sy=(v.videoHeight-s)/2,o=Math.min(560,s);
+        c.width=o;c.height=o;ctx.drawImage(v,sx,sy,s,s,0,0,o,o);
+        const r=jsQR(ctx.getImageData(0,0,o,o).data,o,o,{inversionAttempts:'dontInvert'});if(r&&r.data)txt=r.data;
+      }
+    }catch(e){}
+    if(txt)return hit(txt);
+    setTimeout(loop,120);
+  }
+  function hit(txt){
+    done=true;
+    try{navigator.vibrate&&navigator.vibrate(120);}catch(e){}
+    $('frame').classList.add('hit');
+    msg('✔ Đã nhận mã – đang mở phiếu tuần tra...','ok');
+    try{stream.getTracks().forEach(t=>t.stop());}catch(e){}
+    const url=app+(app.indexOf('?')>=0?'&':'?')+'qr='+encodeURIComponent(txt)+'&m=scan';
+    setTimeout(()=>{location.href=url;},250);
+  }
+  $('torch').onclick=async()=>{try{torchOn=!torchOn;await track.applyConstraints({advanced:[{torch:torchOn}]});}catch(e){}};
+  // quay lại trang (nút Back) -> quét lại
+  window.addEventListener('pageshow',e=>{if(e.persisted){done=false;$('frame').classList.remove('hit');start();}});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden&&stream&&!done){stream.getTracks().forEach(t=>t.stop());stream=null;}else if(!document.hidden&&!stream&&!done)start();});
+  start();
+})();
+</script>
+</body>
+</html>
